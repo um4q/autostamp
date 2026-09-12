@@ -14,10 +14,14 @@ of the box.
 
 Run:  python3 assets/generate_stamp.py
 """
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 import os
 
-W, H = 1200, 580
+# H is sized to hug the bottom row of fields (no dead space below them,
+# before the border) - matching the reference stamp's proportions. A small
+# auto-crop safety pass in __main__ then trims any leftover white margin
+# outside the border while guaranteeing the border itself is never clipped.
+W, H = 1200, 496
 SCALE = 1  # supersampling handled by drawing at this resolution directly
 
 RED = (196, 22, 28, 255)
@@ -141,7 +145,23 @@ def build():
     return img
 
 
+def crop_to_border(img, pad=14):
+    """Trim any excess white canvas down to a small, even margin around
+    the red border, without ever clipping the border line itself."""
+    rgb = img.convert("RGB")
+    bg = Image.new("RGB", rgb.size, (255, 255, 255))
+    bbox = ImageChops.difference(rgb, bg).getbbox()
+    if bbox is None:
+        return img
+    x0, y0, x1, y1 = bbox
+    x0 = max(0, x0 - pad)
+    y0 = max(0, y0 - pad)
+    x1 = min(img.width, x1 + pad)
+    y1 = min(img.height, y1 + pad)
+    return img.crop((x0, y0, x1, y1))
+
+
 if __name__ == "__main__":
     out = os.path.join(os.path.dirname(__file__), "as_built_stamp.png")
-    build().save(out)
+    crop_to_border(build()).save(out)
     print("wrote", out)
