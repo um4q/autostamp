@@ -46,12 +46,10 @@ python3 assets/generate_stamp.py
 
 - Python 3.9+
 - Tkinter (ships with the standard Windows/macOS Python installers; on
-  Linux install it separately, e.g. `sudo apt install python3-tk`)
-- The packages in `requirements.txt`:
+  Linux install it separately, e.g. `sudo apt install python3-tk` -
+  see below, this is the one thing that can't be auto-installed)
 
-```bash
-pip install -r requirements.txt
-```
+That's it - you do **not** need to manually `pip install` anything.
 
 ## Running it
 
@@ -59,7 +57,24 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-This opens the GUI:
+The first time you run this, it automatically downloads and installs the
+packages it needs (PyMuPDF, Pillow, NumPy, SciPy - listed in
+`requirements.txt` for reference/manual use) directly into your Python.
+If your Python won't allow that (e.g. a Linux distro that locks down the
+system Python with PEP 668), it transparently creates a small private
+virtual environment instead (`.autostamp-venv/`, next to `main.py`),
+installs there, and relaunches itself inside it - still with the same
+`python3 main.py` command. Subsequent runs skip straight to the GUI since
+everything is already installed.
+
+The one piece that genuinely can't be downloaded automatically is
+Tkinter itself (Python's GUI toolkit) - on Linux it's a separate OS
+package, not something pip can fetch. If it's missing, AutoStamp prints
+the exact one-line command to install it (e.g.
+`sudo apt install python3-tk`) and exits, instead of failing with a
+confusing traceback.
+
+Once everything's in place, this opens the GUI:
 
 1. **Add PDFs...** - pick one or more documents to stamp.
 2. **Stamp image** - defaults to the bundled `assets/as_built_stamp.png`;

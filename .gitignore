@@ -2,4 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.autostamp-venv/
 *_STAMPED.pdf
