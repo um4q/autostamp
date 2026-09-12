@@ -45,6 +45,16 @@ EMPTY_THRESHOLD = 0.006                # max fraction of "ink" pixels allowed
                                         # inside the stamp's footprint
 SEARCH_STEP_IN = 0.12                  # placement search grid resolution
 
+# "Never skip" fallback (see find_placement_px): on a page so densely
+# packed that the fixed-size stamp can't sit anywhere completely empty,
+# shrink it (preserving its aspect ratio) in steps of SHRINK_FACTOR down to
+# MIN_STAMP_WIDTH_IN before giving up on a perfectly clean fit. If even the
+# smallest legible size can't find a completely empty spot, the very last
+# resort is the least-obstructive spot available, so a page is only ever
+# skipped when never_skip=False.
+MIN_STAMP_WIDTH_IN = 1.0
+SHRINK_FACTOR = 0.85
+
 # Existing-stamp detection (round PE seals, permit boxes, ...)
 STAMP_MIN_DIM_IN = 0.45
 STAMP_MAX_DIM_IN = 3.4
@@ -66,6 +76,9 @@ class StampOptions:
     bottom_exclude_in: float = BOTTOM_EXCLUDE_IN
     gap_in: float = GAP_IN
     empty_threshold: float = EMPTY_THRESHOLD
+    never_skip: bool = True           # always place a stamp; shrink/overlap
+                                       # as a last resort rather than skip
+    min_stamp_width_in: float = MIN_STAMP_WIDTH_IN
 
 
 @dataclass
@@ -74,6 +87,9 @@ class PageResult:
     placed: bool
     rect_pt: Optional[tuple] = None   # (x0,y0,x1,y1) in PDF points
     used_existing_stamp: bool = False
+    tight_fit: bool = False           # True if the page was so packed the
+                                       # stamp had to be shrunk and/or a
+                                       # small amount of overlap was unavoidable
     reason: str = ""
 
 
@@ -234,19 +250,18 @@ def _nearest_empty_window(ii, page_w, page_h, win_w, win_h,
     return best
 
 
-def find_placement_px(mask_full: np.ndarray, mask_stripped: np.ndarray, dpi: int,
-                       win_w: int, win_h: int, opts: StampOptions):
-    """Returns (x, y, used_cluster, reason) in analysis-resolution pixels,
-    or (None, None, False, reason) if nothing suitable was found."""
+def _find_clean_placement(mask_full: np.ndarray, mask_stripped: np.ndarray, dpi: int,
+                           win_w: int, win_h: int, opts: StampOptions,
+                           top_excl_px: int, bottom_excl_px: int):
+    """Returns (x, y, used_cluster, reason) for a *completely* empty
+    win_w x win_h spot, or (None, None, False, reason) if none exists."""
     h, w = mask_full.shape
     margin_px = int(opts.margin_in * dpi)
-    top_excl_px = int(opts.top_exclude_in * dpi)
-    bottom_excl_px = int(opts.bottom_exclude_in * dpi)
     gap_px = int(opts.gap_in * dpi)
     step_px = int(SEARCH_STEP_IN * dpi)
 
     if win_w > (w - 2 * margin_px) or win_h > (h - top_excl_px - bottom_excl_px - 2 * margin_px):
-        return None, None, False, "page too small for the stamp at this fixed size"
+        return None, None, False, "page too small for the stamp at this size"
 
     ii = _integral_image(mask_full)
     clusters = _find_clusters(mask_stripped, dpi, top_excl_px, bottom_excl_px)
@@ -283,7 +298,104 @@ def find_placement_px(mask_full: np.ndarray, mask_stripped: np.ndarray, dpi: int
             else "existing stamp(s) found but no clear space beside them; used nearest open space"
         return pos[0], pos[1], False, reason
 
-    return None, None, False, "no sufficiently empty area found on this page"
+    return None, None, False, "no sufficiently empty area found at this size"
+
+
+def _least_ink_position(mask_full: np.ndarray, win_w: int, win_h: int,
+                         margin_px: int, top_excl_px: int, bottom_excl_px: int,
+                         step_px: int):
+    """Absolute last resort: the win_w x win_h spot with the LEAST ink in
+    it anywhere on the page (never returns None as long as the window fits
+    within the page margins at all). Tries to stay clear of the header/
+    title-block bands first, and only gives those up if the window
+    genuinely doesn't fit outside them."""
+    h, w = mask_full.shape
+    ii = _integral_image(mask_full)
+
+    def search(y_lo, y_hi):
+        x_lo, x_hi = margin_px, w - margin_px - win_w
+        y_lo, y_hi = max(margin_px, y_lo), min(h - margin_px, y_hi) - win_h
+        if x_hi < x_lo or y_hi < y_lo:
+            return None
+        step = max(2, step_px)
+        best, best_frac = None, None
+        for y in range(int(y_lo), int(y_hi) + 1, step):
+            for x in range(int(x_lo), int(x_hi) + 1, step):
+                frac = _ink_fraction(ii, x, y, win_w, win_h)
+                if best_frac is None or frac < best_frac:
+                    best_frac, best = frac, (x, y)
+        return best, best_frac
+
+    result = search(top_excl_px, h - bottom_excl_px)
+    if result is None:
+        # Excluded bands leave no room at all for this size - drop them.
+        result = search(0, h)
+    if result is None:
+        # Still nothing (window wider/taller than the page margins allow) -
+        # this is the true "page too small" edge case; place flush at the
+        # top-left inside whatever margin exists so it's at least on-page.
+        return max(0, margin_px), max(0, margin_px), 1.0
+    (x, y), frac = result
+    return x, y, frac
+
+
+def find_placement_px(mask_full: np.ndarray, mask_stripped: np.ndarray, dpi: int,
+                       target_win_w: int, target_win_h: int, opts: StampOptions):
+    """Always returns (x, y, win_w, win_h, used_cluster, tight_fit, reason)
+    in analysis-resolution pixels - unless opts.never_skip is False, in
+    which case it returns (None, None, None, None, False, False, reason)
+    when no completely empty spot exists at the requested fixed size.
+
+    Tries the requested fixed size first. If the page is too densely
+    packed for a completely empty spot at that size, it shrinks the stamp
+    (preserving its aspect ratio) in steps down to opts.min_stamp_width_in
+    and tries again at each size. If even the smallest legible size can't
+    find a completely empty spot, it falls back to the least-obstructive
+    spot available on the page - so a page is only ever left unstamped
+    when never_skip is explicitly turned off.
+    """
+    h, w = mask_full.shape
+    top_excl_px = int(opts.top_exclude_in * dpi)
+    bottom_excl_px = int(opts.bottom_exclude_in * dpi)
+    aspect = target_win_h / target_win_w if target_win_w else 1.0
+    min_w = max(1, min(target_win_w, int(round(opts.min_stamp_width_in * dpi))))
+
+    sizes = []
+    win_w = target_win_w
+    while win_w > min_w:
+        sizes.append(win_w)
+        win_w = int(win_w * SHRINK_FACTOR)
+    sizes.append(min_w)
+
+    last_reason = "no sufficiently empty area found on this page"
+    for win_w in sizes:
+        win_h = max(1, int(round(win_w * aspect)))
+        x, y, used_cluster, reason = _find_clean_placement(
+            mask_full, mask_stripped, dpi, win_w, win_h, opts, top_excl_px, bottom_excl_px)
+        if x is not None:
+            tight_fit = win_w < target_win_w
+            if tight_fit:
+                reason = (f"page is tightly packed - stamp shrunk to {win_w / dpi:.2f}in "
+                          f"wide to fit cleanly ({reason})")
+            return x, y, win_w, win_h, used_cluster, tight_fit, reason
+        last_reason = reason
+
+    if not opts.never_skip:
+        return None, None, None, None, False, False, last_reason
+
+    # Absolute last resort: never skip. Take the smallest legible size and
+    # place it at the least-obstructive spot on the page, even though that
+    # means accepting some unavoidable overlap.
+    margin_px = int(opts.margin_in * dpi)
+    step_px = int(SEARCH_STEP_IN * dpi)
+    win_w = min_w
+    win_h = max(1, int(round(win_w * aspect)))
+    x, y, ink_frac = _least_ink_position(
+        mask_full, win_w, win_h, margin_px, top_excl_px, bottom_excl_px, step_px)
+    reason = (f"page has no completely empty area even at the smallest legible size "
+              f"({win_w / dpi:.2f}in wide) - placed at the least-obstructive spot found "
+              f"(~{ink_frac * 100:.1f}% of that spot has existing content)")
+    return x, y, win_w, win_h, False, True, reason
 
 
 # --------------------------------------------------------------------------
@@ -328,8 +440,8 @@ def stamp_document(input_path: str, output_path: str, opts: StampOptions,
         doc = fitz.open(input_path)
         try:
             target_pages = _parse_page_spec(opts.pages, doc.page_count)
-            win_w = int(round(stamp_w_in * opts.dpi))
-            win_h = int(round(stamp_h_in * opts.dpi))
+            target_win_w = int(round(stamp_w_in * opts.dpi))
+            target_win_h = int(round(stamp_h_in * opts.dpi))
             h_len_px = int(LINE_STRIP_H_IN * opts.dpi)
             v_len_px = int(LINE_STRIP_V_IN * opts.dpi)
 
@@ -340,8 +452,8 @@ def stamp_document(input_path: str, output_path: str, opts: StampOptions,
                 mask_full = gray < INK_THRESHOLD
                 mask_stripped = _strip_lines(mask_full, h_len_px, v_len_px)
 
-                x, y, used_cluster, reason = find_placement_px(
-                    mask_full, mask_stripped, opts.dpi, win_w, win_h, opts)
+                x, y, win_w, win_h, used_cluster, tight_fit, reason = find_placement_px(
+                    mask_full, mask_stripped, opts.dpi, target_win_w, target_win_h, opts)
 
                 if x is None:
                     log(f"  page {page_no}: skipped ({reason})")
@@ -355,7 +467,7 @@ def stamp_document(input_path: str, output_path: str, opts: StampOptions,
                 log(f"  page {page_no}: {reason}")
                 result.pages.append(PageResult(
                     page_no, True, rect_pt=tuple(rect), used_existing_stamp=used_cluster,
-                    reason=reason))
+                    tight_fit=tight_fit, reason=reason))
 
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             doc.save(output_path)
@@ -386,10 +498,10 @@ def preview_page(input_path: str, page_number: int, opts: StampOptions,
         v_len_px = int(LINE_STRIP_V_IN * opts.dpi)
         mask_stripped = _strip_lines(mask_full, h_len_px, v_len_px)
 
-        win_w = int(round(stamp_w_in * opts.dpi))
-        win_h = int(round(stamp_h_in * opts.dpi))
-        x, y, used_cluster, reason = find_placement_px(
-            mask_full, mask_stripped, opts.dpi, win_w, win_h, opts)
+        target_win_w = int(round(stamp_w_in * opts.dpi))
+        target_win_h = int(round(stamp_h_in * opts.dpi))
+        x, y, win_w, win_h, used_cluster, tight_fit, reason = find_placement_px(
+            mask_full, mask_stripped, opts.dpi, target_win_w, target_win_h, opts)
 
         zoom = preview_dpi / 72.0
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)

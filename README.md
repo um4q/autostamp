@@ -13,11 +13,20 @@ For every page of every PDF you give it, AutoStamp:
 3. Places the new stamp **right next to** any such existing stamp(s) it
    finds, in the nearest spot that is completely empty.
 4. If a page has no existing stamps, it finds the best open space instead.
-5. If a page is fully packed and has no usable empty space (e.g. a page
-   that's just a filled-in data table), it **skips that page** rather than
-   stamping on top of content, and says so in the log.
-6. Always stamps at the same fixed physical size (in inches), so every
-   document looks consistent.
+5. Stamps at a fixed physical size (in inches) by default, so every
+   document looks consistent - but if a page is too densely packed for
+   that size to fit anywhere cleanly (e.g. a page that's just a filled-in
+   data table with no full-size gap), it **never just skips the page**:
+   it shrinks the stamp (preserving its proportions) step by step until it
+   finds a spot that's still completely empty, down to a configurable
+   minimum legible size. Only in the extreme case where even that smallest
+   size can't find a totally clean spot does it fall back to the single
+   least-obstructive spot on the page, so a stamp always ends up
+   somewhere. Every page's log line says exactly what happened (placed at
+   full size / shrunk to fit cleanly / tight fit with unavoidable overlap).
+   The old strict "skip rather than shrink or overlap" behaviour is still
+   available - untick "Never skip a page" in the GUI (or pass
+   `never_skip=False` when scripting).
 
 Everything happens on a copy of the file - your original PDFs are never
 modified in place (unless you point the output at the same folder AND
@@ -27,13 +36,16 @@ next to the original).
 ## About the stamp image
 
 `assets/as_built_stamp.png` is a recreation of the YANDA "AS BUILT MARK UP"
-stamp built from the reference screenshot - a source image file wasn't
-available, so it was redrawn to match (same layout, text and colour-coded
-legend, "Levy Ostrup" / "403-892-8877" pre-filled, "Checked/Certified By"
-and "Date" left blank, same as the original). If you have the real logo/
-stamp file, use it instead: either overwrite `assets/as_built_stamp.png`,
-or use the "Browse..." button in the GUI to point at your file - the
-placement engine works with any PNG/JPG image, at any aspect ratio.
+stamp built from the reference screenshot - **no source image file has been
+provided**, so it's a redrawn approximation (same layout, text and
+colour-coded legend, "Levy Ostrup" / "403-892-8877" pre-filled,
+"Checked/Certified By" and "Date" left blank), not a pixel-perfect copy.
+For an exact match, share the actual `.png`/`.jpg` file (attach/upload it
+as a file, not a pasted screenshot) and drop it in as
+`assets/as_built_stamp.png`, or use the "Browse..." button in the GUI to
+point at it directly - the placement engine works with any PNG/JPG image,
+at any aspect ratio, so your real file is used exactly as-is with no
+redrawing involved.
 
 To regenerate the bundled default stamp image (e.g. after tweaking
 `assets/generate_stamp.py`):
@@ -88,8 +100,10 @@ Once everything's in place, this opens the GUI:
 4. **Pages to stamp** - `all` (default), or something like `2` or `1-2,4`.
 5. **Placement rules (advanced)** - page margin, how much of the top/
    bottom of the page to always keep clear (the bottom default of 1.5"
-   is meant to keep the stamp off the title block), and the gap to leave
-   next to existing stamps.
+   is meant to keep the stamp off the title block), the gap to leave
+   next to existing stamps, and the "Never skip a page" checkbox (on by
+   default) with the smallest size the stamp is allowed to shrink to when
+   a page is too tight for the full fixed size.
 6. **Output** - either write `<name>_STAMPED.pdf` next to each original,
    or send everything to a chosen folder.
 7. **Preview First Page** - renders the first page of the first document

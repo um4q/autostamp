@@ -82,7 +82,7 @@ class AutoStampApp(tk.Tk):
             side="left", padx=6, pady=6)
 
         # --- Size / pages -----------------------------------------------------
-        size_frame = ttk.LabelFrame(self, text="Stamp size (fixed on every page, for consistency)")
+        size_frame = ttk.LabelFrame(self, text="Stamp size (fixed on every page; shrinks only if a page is too packed to fit it)")
         size_frame.pack(fill="x", **pad)
 
         ttk.Label(size_frame, text="Width (inches):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
@@ -125,6 +125,16 @@ class AutoStampApp(tk.Tk):
         labeled_spin(adv, 0, 2, "Keep clear of top (in):", self.top_excl_var, 0.0, 2.0, 0.05)
         labeled_spin(adv, 1, 0, "Keep clear of bottom / title block (in):", self.bottom_excl_var, 0.0, 4.0, 0.1)
         labeled_spin(adv, 1, 2, "Gap next to existing stamps (in):", self.gap_var, 0.0, 1.0, 0.05)
+
+        self.never_skip_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            adv, text="Never skip a page - shrink the stamp (or use the least-obstructive\n"
+                      "spot as a last resort) rather than leave a page unstamped",
+            variable=self.never_skip_var).grid(
+            row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(2, 4))
+
+        self.min_width_var = tk.DoubleVar(value=stamper.MIN_STAMP_WIDTH_IN)
+        labeled_spin(adv, 3, 0, "Smallest the stamp may shrink to (in):", self.min_width_var, 0.4, 3.0, 0.1)
 
         # --- Output -----------------------------------------------------
         out_frame = ttk.LabelFrame(self, text="Output")
@@ -240,6 +250,8 @@ class AutoStampApp(tk.Tk):
             top_exclude_in=float(self.top_excl_var.get()),
             bottom_exclude_in=float(self.bottom_excl_var.get()),
             gap_in=float(self.gap_var.get()),
+            never_skip=bool(self.never_skip_var.get()),
+            min_stamp_width_in=float(self.min_width_var.get()),
         )
 
     def _output_path_for(self, input_path: str) -> str:
@@ -297,7 +309,8 @@ class AutoStampApp(tk.Tk):
         thread.start()
 
     def _worker(self, jobs, opts: StampOptions):
-        placed_total = 0
+        clean_total = 0
+        tight_total = 0
         skipped_total = 0
         failed = 0
         for i, (in_path, out_path) in enumerate(jobs, start=1):
@@ -308,17 +321,19 @@ class AutoStampApp(tk.Tk):
                 self._log(f"  FAILED: {result.error}")
             else:
                 for pr in result.pages:
-                    if pr.placed:
-                        placed_total += 1
-                    else:
+                    if not pr.placed:
                         skipped_total += 1
+                    elif pr.tight_fit:
+                        tight_total += 1
+                    else:
+                        clean_total += 1
                 self._log(f"  saved -> {result.output_path}")
             if self._closing:
                 return
             self.after(0, self._advance_progress, i)
 
-        self._log(f"Done. Stamped {placed_total} page(s), skipped {skipped_total}, "
-                   f"{failed} file(s) failed.")
+        self._log(f"Done. {clean_total} page(s) stamped cleanly, {tight_total} needed a tight "
+                   f"fit (page was densely packed), {skipped_total} skipped, {failed} file(s) failed.")
         if not self._closing:
             self.after(0, self._finish_run)
         self.worker_running = False
